@@ -1,0 +1,1322 @@
+; Secure Model Communication Protocol 1.0
+; Normative CDDL, draft 0.1.0-draft.1
+;
+; Integer labels in the 60000-60999 range are private-use labels for this
+; pre-standard draft. Standards publication must request permanent allocations
+; without changing semantics. Comments are normative field documentation.
+
+; ---------------------------------------------------------------------------
+; Top-level signed record
+; ---------------------------------------------------------------------------
+
+smcp-record = #6.18(smcp-cose-sign1)
+smcp-cose-sign1 = [
+  bstr .cbor protected-map,            ; protected
+  {},                                  ; unprotected; MUST be empty in Core
+  bstr .cbor envelope,                 ; payload
+  bstr                                 ; signature
+]
+
+protected-map = {
+  1: cose-alg,                         ; COSE alg: ES256 (-7) or EdDSA (-8)
+  2: [+ label],                        ; COSE crit; includes all private labels
+  4: key-id,                           ; COSE kid of active session key
+  60000: "SMCP/1",                    ; protocol domain separator
+  60001: version,                      ; MUST equal envelope.version
+  60002: message-type,                 ; MUST equal envelope.type
+  60003: session-id,                   ; MUST equal envelope.session_id
+  60004: uint,                         ; MUST equal envelope.seq
+  ? 60005: [* extension-id]            ; critical extension IDs
+}
+
+cose-alg = -7 / -8
+label = int / tstr
+key-id = bstr .size (1..64)
+session-id = bstr .size 32
+message-id = bstr .size 16
+digest = bstr .size 32                 ; SHA-256 unless suite says otherwise
+nonce = bstr .size 32
+epoch-ms = uint
+principal-id = tstr .size (1..1024)    ; canonical absolute URI
+resource-id = tstr .size (1..2048)     ; registered canonical resource URI
+action-id = tstr .size (1..512)        ; registered absolute action URI
+extension-id = tstr .size (1..256)     ; stable extension URI
+profile-id = tstr .size (1..128)
+suite-id = uint
+media-type = tstr .size (1..255)
+semver = tstr .size (1..64)
+uri = tstr .size (1..2048)
+safe-text = tstr .size (0..1024)
+opaque-id = bstr .size (1..64)
+
+version = [uint, uint]                 ; [major, minor]
+
+envelope = {
+  0: version,
+  1: message-type,
+  2: message-id,                       ; unique under sender key
+  3: principal-id,                     ; issuer controlling session key
+  4: [+ principal-id],                 ; exact audiences
+  5: epoch-ms,                         ; issued_at
+  6: epoch-ms,                         ; expires_at
+  7: session-id,
+  8: uint,                             ; monotonically increasing sender seq
+  ? 9: message-id,                     ; correlation_id
+  ? 10: [* capability-presentation],   ; authorization material
+  ? 11: digest,                        ; consent receipt digest
+  ? 12: { * extension-id => any },     ; negotiated signed extensions
+  13: message-body
+}
+
+message-type =
+    1 / 2 / 3 / 4 / 5 / 6 / 7 / 8 / 9
+  / 16 / 17
+  / 32 / 33 / 34 / 35 / 36 / 37
+  / 48 / 49 / 50
+  / 64 / 65
+  / 80 / 81 / 82 / 83 / 84 / 85 / 86
+  / 96 / 97 / 98 / 99
+  / 112 / 113 / 114
+  / 128 / 129 / 130 / 131
+  / 144 / 145 / 146 / 147
+  / 255
+
+message-body =
+    client-hello / server-hello / authenticate / auth-result / finish
+  / reauth / rekey / close / close-ack
+  / discover / discovery-result
+  / cap-request / cap-grant / cap-delegate / cap-revoke
+  / revocation-query / revocation-status
+  / consent-request / consent-response / consent-revoke
+  / risk-request / risk-assessment
+  / op-request / op-prepare / op-prepared / op-commit / op-result
+  / op-cancel / op-status
+  / stream-open / stream-data / stream-credit / stream-close
+  / subscribe / event / unsubscribe
+  / manifest-get / manifest-result / registry-query / registry-result
+  / audit-submit / audit-receipt / audit-proof-request / audit-proof
+  / error-body
+
+; External AAD passed to COSE Sig_structure. It is not inside the record.
+external-aad = [
+  "SMCP-EXTERNAL-AAD-v1",
+  profile-id,                          ; transport profile
+  bstr .size 32 / null,                ; channel binding
+  digest                               ; negotiation transcript hash
+]
+
+; ---------------------------------------------------------------------------
+; Common structures
+; ---------------------------------------------------------------------------
+
+capability-presentation = capability-token / capability-ref
+capability-token = #6.18(capability-cose-sign1)
+capability-cose-sign1 = [
+  bstr .cbor capability-protected-map, ; protected
+  {},                                  ; unprotected
+  bstr .cbor capability,               ; payload
+  bstr                                 ; signature
+]
+
+capability-protected-map = {
+  1: cose-alg,
+  2: [+ label],                        ; includes private domain-separator label
+  3: "application/smcp-capability+cbor",
+  4: key-id,
+  60000: "SMCP-CAPABILITY-v1"
+}
+capability-ref = {
+  0: 1,                                ; discriminant: reference
+  1: digest,                           ; complete verified chain digest
+  2: uint                              ; expected issuer revocation epoch
+}
+
+credential-presentation = {
+  0: profile-id,                       ; registered credential profile
+  1: [+ bstr],                         ; leaf-first credential objects
+  2: digest,                           ; digest over exact credential array
+  ? 3: uri,                            ; authoritative status endpoint
+  ? 4: uint                            ; known status epoch
+}
+
+session-public-key = bstr               ; deterministic COSE_Key bytes
+
+actor-chain = [* actor]
+actor = {
+  0: principal-id,                     ; actor principal
+  1: tstr,                             ; registered role
+  ? 2: digest,                         ; supporting assertion digest
+  ? 3: principal-id                    ; delegator immediately above actor
+}
+
+composite-identity = {
+  0: principal-id,                     ; operator
+  1: principal-id,                     ; workload
+  2: principal-id,                     ; agent_instance
+  ? 3: artifact-reference,             ; model artifact
+  ? 4: digest,                         ; agent configuration digest
+  ? 5: principal-id,                   ; acting human
+  ? 6: tstr,                           ; registered purpose URI
+  ? 7: actor-chain
+}
+
+artifact-reference = {
+  0: media-type,
+  1: digest,
+  ? 2: uri,
+  ? 3: uint                            ; size in bytes
+}
+
+resource-snapshot = {
+  0: resource-id,
+  1: principal-id,                     ; resource owner
+  2: tstr,                             ; registered resource type
+  3: bstr,                             ; authoritative opaque version
+  ? 4: tstr,                           ; classification
+  ? 5: tstr                            ; tenant/trust-domain ID
+}
+
+argument-value = any                   ; constrained by digest-identified schema
+normalized-operation = {
+  0: action-id,
+  1: resource-snapshot,
+  2: argument-value,
+  3: digest,                           ; argument schema digest
+  4: digest,                           ; SHA-256 deterministic arguments
+  5: digest                            ; tool manifest digest
+}
+
+effect = {
+  0: tstr,                             ; registered effect class
+  1: [* resource-id],                  ; affected resources
+  ? 2: [* uri],                        ; external destinations
+  ? 3: bool,                           ; reversible
+  ? 4: uint,                           ; rollback window ms
+  ? 5: amount,                         ; worst-case cost
+  ? 6: [* tstr]                        ; data classification labels
+}
+
+amount = {
+  0: int,                              ; currency minor units
+  1: tstr .size 3                      ; ISO 4217 code
+}
+
+obligation = {
+  0: tstr,                             ; registered obligation ID
+  1: bool,                             ; critical
+  ? 2: any                             ; obligation-specific deterministic args
+}
+
+signed-object-ref = {
+  0: digest,
+  ? 1: uri,
+  ? 2: bstr                            ; optional complete signed bytes
+}
+
+audit-ref = {
+  0: digest,                           ; audit event digest
+  ? 1: digest,                         ; inclusion promise/receipt digest
+  ? 2: uri                             ; log endpoint
+}
+
+page-cursor = bstr .size (1..512)      ; opaque, query-digest-bound, expiring
+
+; ---------------------------------------------------------------------------
+; 1-9: handshake and session lifecycle
+; ---------------------------------------------------------------------------
+
+client-hello = {
+  0: 1,
+  1: nonce,                            ; client_nonce
+  2: [+ version],                      ; ordered exact versions
+  3: version,                          ; local minimum acceptable version
+  4: [+ suite-id],                     ; complete registered suites
+  5: [+ profile-id],                   ; transports
+  6: [+ profile-id],                   ; encodings
+  7: [+ profile-id],                   ; compression profiles; includes none
+  8: session-public-key,
+  9: [+ profile-id],                   ; accepted credential profiles
+  ? 10: [* extension-offer],
+  11: limits,
+  ? 12: bstr                           ; stateless retry cookie
+}
+
+extension-offer = {
+  0: extension-id,
+  1: [+ version],
+  2: bool                              ; critical to initiator
+}
+
+limits = {
+  0: uint,                             ; max record bytes
+  1: uint,                             ; max concurrent operations
+  2: uint,                             ; max streams
+  3: uint,                             ; max aggregate stream credit
+  4: uint,                             ; max map entries
+  5: uint,                             ; max nesting depth
+  6: uint                              ; idle timeout ms
+}
+
+server-hello = {
+  0: 2,
+  1: nonce,                            ; echoed client_nonce
+  2: nonce,                            ; server_nonce
+  3: session-id,
+  4: version,                          ; selected exact version
+  5: version,                          ; server max supported
+  6: suite-id,
+  7: profile-id,                       ; selected transport
+  8: profile-id,                       ; selected encoding
+  9: profile-id,                       ; selected compression
+  10: session-public-key,
+  11: profile-id,                      ; server credential profile
+  ? 12: [* extension-selection],
+  13: limits,
+  14: digest,                          ; prior transcript + this body sans field 14
+  ? 15: bstr                           ; retry state
+}
+
+extension-selection = {
+  0: extension-id,
+  1: version,
+  2: bool                              ; negotiated criticality
+}
+
+authenticate = {
+  0: 3,
+  1: tstr,                             ; initiator/responder role
+  2: credential-presentation,
+  3: session-public-key,
+  4: bstr,                             ; long-term credential-key proof
+  5: nonce,                            ; peer challenge being answered
+  ? 6: attestation-evidence,
+  ? 7: tstr                            ; requested trust domain
+}
+
+attestation-evidence = {
+  0: profile-id,                       ; RATS/EAT evidence profile
+  1: bstr,                             ; opaque evidence bytes
+  2: nonce,
+  3: epoch-ms,
+  ? 4: uri                             ; reference-values/verifier hint
+}
+
+auth-result = {
+  0: 4,
+  1: bool,                             ; accepted
+  ? 2: uint,                           ; safe error code if rejected
+  ? 3: principal-id,                   ; authenticated principal
+  ? 4: composite-identity,
+  ? 5: tstr,                           ; assurance level
+  ? 6: epoch-ms,                       ; credential/status validity end
+  ? 7: tstr,                           ; trust domain
+  ? 8: uint,                           ; trust/policy epoch
+  9: digest                            ; prior transcript + this body sans field 9
+}
+
+finish = {
+  0: 5,
+  1: digest,                           ; complete negotiation/auth transcript
+  2: bstr .size 32 / null,             ; TLS exporter binding or null by profile
+  3: uint,                             ; first accepted peer sequence
+  4: digest                            ; negotiated limits/profile digest
+}
+
+; Core handshake total order is CLIENT_HELLO(I), SERVER_HELLO(R),
+; AUTHENTICATE(I), AUTHENTICATE(R), AUTH_RESULT(R), AUTH_RESULT(I),
+; FINISH(I), FINISH(R). A receiver rejects any other turn ordering.
+
+reauth = {
+  0: 6,
+  1: nonce,
+  2: [+ profile-id],                   ; required credential/evidence profiles
+  3: tstr,                             ; registered reason
+  4: epoch-ms,                         ; deadline
+  ? 5: uint                            ; minimum assurance level code
+}
+
+rekey = {
+  0: 7,
+  1: session-public-key,
+  2: key-id,
+  3: uint,                             ; new key epoch
+  4: uint,                             ; activation sequence
+  5: bstr                              ; current session-key continuity signature
+}
+
+close = {
+  0: 8,
+  1: tstr,                             ; registered close reason
+  2: uint,                             ; last sequence sent
+  3: uint,                             ; last sequence received
+  ? 4: [* stream-summary],
+  ? 5: bool,                           ; request final audit checkpoint
+  6: epoch-ms                          ; drain deadline
+}
+
+stream-summary = {
+  0: opaque-id,                        ; stream ID
+  1: uint,                             ; final chunk/event sequence
+  2: digest                            ; ordered content digest
+}
+
+close-ack = {
+  0: 9,
+  1: digest,                           ; digest of CLOSE record
+  2: uint,
+  3: uint,
+  ? 4: [* audit-ref]
+}
+
+; ---------------------------------------------------------------------------
+; 16-17: discovery
+; ---------------------------------------------------------------------------
+
+discover = {
+  0: 16,
+  ? 1: [* tstr],                       ; service/tool categories
+  ? 2: [* action-id],
+  ? 3: [* profile-id],                 ; required compliance profiles
+  ? 4: [* tstr],                       ; requested result fields
+  5: uint,                             ; maximum results
+  ? 6: page-cursor,
+  ? 7: uint,                           ; privacy budget units
+  ? 8: { * tstr => any }               ; registered typed filters
+}
+
+discovery-result = {
+  0: 17,
+  1: digest,                           ; DISCOVER body digest
+  2: [* discovery-entry],
+  ? 3: page-cursor,
+  4: epoch-ms,                         ; result expiry
+  ? 5: signed-object-ref,              ; registry proof
+  ? 6: bstr                            ; non-semantic padding
+}
+
+discovery-entry = {
+  0: principal-id,                     ; service principal
+  1: [+ endpoint],
+  2: [* action-id],
+  ? 3: digest,                         ; manifest digest
+  4: [+ profile-id],                   ; required profiles
+  ? 5: safe-text                       ; non-authoritative description
+}
+
+endpoint = {
+  0: uri,
+  1: profile-id,
+  ? 2: tstr,                           ; region
+  ? 3: uint                            ; priority
+}
+
+; ---------------------------------------------------------------------------
+; Capability object and messages 32-37
+; ---------------------------------------------------------------------------
+
+; capability-token COSE payload. Standard CWT labels are retained where they
+; exist; 600xx claims are the SMCP draft private-use labels.
+capability = {
+  1: principal-id,                     ; CWT iss
+  2: principal-id,                     ; CWT sub: holder principal
+  3: principal-id,                     ; CWT aud: exact resource service
+  4: epoch-ms,                         ; CWT exp (SMCP epoch-ms profile)
+  5: epoch-ms,                         ; CWT nbf
+  6: epoch-ms,                         ; CWT iat
+  7: bstr .size 16,                    ; CWT cti / cap_id
+  8: confirmation,                     ; RFC 8747-style cnf
+  60020: [+ action-id],
+  60021: [+ resource-selector],
+  60022: [* constraint],
+  ? 60023: digest,                     ; parent token exact-byte digest
+  60024: delegation-control,
+  60025: uint,                         ; issuer revocation epoch
+  ? 60026: digest,                     ; minimum policy bundle hash
+  ? 60027: actor-chain,
+  ? 60028: tstr                        ; purpose URI
+}
+
+confirmation = {
+  1: bstr                              ; deterministic COSE_Key or thumbprint form
+}
+
+resource-selector = {
+  0: tstr,                             ; registered selector profile
+  1: resource-id,                      ; canonical root/target
+  ? 2: any                             ; profile-specific closed selector
+}
+
+constraint = {
+  0: tstr,                             ; registered constraint ID
+  1: bool,                             ; critical
+  2: any                               ; typed value with defined subset relation
+}
+
+delegation-control = {
+  0: uint .le 8,                       ; remaining delegation depth
+  1: bool,                             ; redelegable
+  ? 2: [* principal-selector]          ; allowed delegate set
+}
+
+principal-selector = {
+  0: tstr,                             ; exact / trust-domain / typed selector
+  1: any                               ; registered closed value
+}
+
+cap-request = {
+  0: 32,
+  1: principal-id,                     ; requested audience
+  2: [+ action-id],
+  3: [+ resource-selector],
+  ? 4: [* constraint],
+  5: session-public-key,               ; holder key
+  6: uint,                             ; desired lifetime ms
+  ? 7: capability-presentation,        ; parent for delegation/exchange
+  ? 8: tstr,                           ; purpose URI
+  ? 9: digest,                         ; OAuth RAR/other auth details digest
+  ? 10: delegation-control
+}
+
+cap-grant = {
+  0: 33,
+  1: [+ capability-token],             ; leaf first or profile-fixed order
+  2: uri,                              ; authoritative status endpoint
+  3: uint,                             ; issuer revocation epoch
+  ? 4: [* tstr],                       ; safely described exclusions/narrowing
+  5: audit-ref
+}
+
+cap-delegate = {
+  0: 34,
+  1: capability-presentation,
+  2: cap-request,                      ; exact requested child body
+  3: actor-chain,
+  ? 4: signed-object-ref,              ; policy decision receipt
+  ? 5: signed-object-ref,              ; consent receipt
+  6: bstr                              ; proposed holder-key proof
+}
+
+cap-revoke = {
+  0: 35,
+  1: tstr,                             ; token/tree/subject/key/issuer-epoch
+  2: bstr,                             ; canonical target identifier/digest
+  3: epoch-ms,                         ; effective time
+  4: tstr,                             ; registered reason category
+  5: bool,                             ; cascade descendants
+  6: uint,                             ; resulting issuer epoch
+  ? 7: signed-object-ref               ; replacement pointer
+}
+
+revocation-query = {
+  0: 36,
+  1: principal-id,                     ; issuer
+  2: uint,                             ; expected epoch
+  3: [+ revocation-target],
+  4: nonce,
+  5: uint                              ; maximum acceptable status age ms
+}
+
+revocation-target = {
+  0: tstr,                             ; token/key/subject/tree
+  1: bstr
+}
+
+revocation-status = {
+  0: 37,
+  1: nonce,
+  2: principal-id,
+  3: uint,                             ; epoch
+  4: uint,                             ; monotonic publication sequence
+  5: [+ status-entry],
+  6: epoch-ms,                         ; this update
+  7: epoch-ms,                         ; next update / hard freshness end
+  8: signed-object-ref                 ; status/log proof
+}
+
+status-entry = {
+  0: revocation-target,
+  1: "good" / "revoked" / "suspended" / "unknown",
+  ? 2: epoch-ms,                       ; effective time
+  ? 3: tstr                            ; safe reason category
+}
+
+; ---------------------------------------------------------------------------
+; Consent 48-50 and risk 64-65
+; ---------------------------------------------------------------------------
+
+consent-request = {
+  0: 48,
+  1: message-id,                       ; consent request ID
+  2: opaque-id,                        ; preparation ID
+  3: principal-id,                     ; requesting principal
+  4: actor-chain,
+  5: principal-id,                     ; consent authority
+  6: principal-id,                     ; final recipient/resource service
+  7: digest,                           ; capability-chain digest
+  8: normalized-operation,
+  9: [+ effect],
+  10: safe-text,                       ; schema-derived display projection
+  11: digest,                          ; display projection digest
+  ? 12: [* tstr],                      ; data classifications
+  ? 13: [* uri],                       ; destinations
+  14: tstr,                            ; purpose URI
+  15: uint,                            ; requested validity ms
+  16: uint,                            ; requested use count
+  17: tstr,                            ; authenticator assurance/UV requirement
+  18: nonce,
+  ? 19: [* safe-text]                  ; schema-derived alternatives
+}
+
+consent-response = {
+  0: 49,
+  1: message-id,                       ; consent request ID
+  2: digest,                           ; exact request digest
+  3: "approve" / "deny",
+  4: principal-id,                     ; consenting authority
+  5: epoch-ms,
+  6: epoch-ms,                         ; receipt expiry
+  7: uint,                             ; maximum uses (0 for denial)
+  8: digest,                           ; approved normalized operation digest
+  9: digest,                           ; approved effects/destination digest
+  ? 10: [* constraint],                ; narrowing only
+  ? 11: webauthn-proof,
+  12: uint,                            ; consent revocation epoch
+  13: uri,                             ; status/revocation endpoint
+  ? 14: tstr                           ; private reason category; no free prose
+}
+
+webauthn-proof = {
+  0: bstr,                             ; authenticator data
+  1: bstr,                             ; clientDataJSON exact bytes
+  2: bstr,                             ; assertion signature
+  3: bstr,                             ; credential ID
+  ? 4: bstr                            ; user handle if policy allows disclosure
+}
+
+; Consent receipt is a separately COSE-signed consent-response body whose
+; issuer is the consent service and whose digest is referenced by operation.
+consent-receipt-token = #6.18(consent-receipt-cose-sign1)
+consent-receipt-cose-sign1 = [
+  bstr .cbor consent-receipt-protected-map,
+  {},
+  bstr .cbor consent-response,
+  bstr
+]
+
+consent-receipt-protected-map = {
+  1: cose-alg,
+  2: [+ label],
+  3: "application/smcp-consent-receipt+cbor",
+  4: key-id,
+  60000: "SMCP-CONSENT-RECEIPT-v1"
+}
+
+consent-revoke = {
+  0: 50,
+  1: digest,                           ; consent receipt/request digest
+  2: principal-id,
+  3: epoch-ms,
+  4: uint,                             ; new revocation epoch
+  5: tstr                              ; reason category
+}
+
+risk-request = {
+  0: 64,
+  1: digest,                           ; complete authorization-input digest
+  2: [* tstr],                         ; requested registered factor classes
+  3: [* signed-object-ref],            ; evidence references
+  ? 4: uint,                           ; privacy budget
+  5: nonce,
+  6: epoch-ms                          ; response deadline
+}
+
+risk-assessment = {
+  0: 65,
+  1: digest,                           ; authorization-input digest
+  2: nonce,
+  3: "block" / "restrict" / "require" / "observe",
+  4: [* risk-finding],
+  5: [* obligation],
+  6: [* constraint],                   ; restrictions only
+  7: principal-id,                     ; engine principal
+  8: tstr,                             ; rule/model name and version
+  9: digest,                           ; engine policy/artifact digest
+  ? 10: uint,                          ; local confidence basis points; not portable
+  11: epoch-ms,
+  12: epoch-ms
+}
+
+risk-finding = {
+  0: tstr,                             ; registered factor
+  1: "adverse" / "acceptable" / "unknown" / "not-applicable",
+  ? 2: any,                            ; privacy-filtered typed evidence
+  ? 3: digest                          ; underlying evidence digest
+}
+
+; ---------------------------------------------------------------------------
+; Operations 80-86
+; ---------------------------------------------------------------------------
+
+op-request = {
+  0: 80,
+  1: message-id,                       ; request_id
+  2: normalized-operation,
+  3: epoch-ms,                         ; operation deadline
+  4: bstr .size (16..64),              ; idempotency key
+  ? 5: result-constraints,
+  ? 6: [* signed-object-ref]            ; policy/risk/manifest/status evidence
+}
+
+result-constraints = {
+  ? 0: uint,                           ; maximum result bytes
+  ? 1: [* tstr],                       ; permitted classifications
+  ? 2: [* uri],                        ; permitted result destinations
+  ? 3: digest                          ; expected output schema
+}
+
+op-prepare = {
+  0: 81,
+  1: message-id,
+  2: normalized-operation,
+  3: [+ effect],
+  4: bstr,                             ; expected resource version
+  5: epoch-ms,
+  6: bstr .size (16..64),              ; idempotency key
+  7: "required" / "preferred" / "none", ; rollback preference
+  ? 8: result-constraints,
+  ? 9: [* signed-object-ref]
+}
+
+op-prepared = {
+  0: 82,
+  1: message-id,                       ; in_reply_to
+  2: opaque-id,                        ; preparation ID
+  3: digest,                           ; OP_PREPARE record/body digest
+  4: digest,                           ; authoritative normalized operation digest
+  5: digest,                           ; authoritative effect preview digest
+  6: [+ effect],                       ; authoritative effect preview
+  7: bstr,                             ; reserved resource version/token
+  8: quota-reservation,
+  9: security-epochs,
+  10: [* obligation],                  ; unmet obligations
+  ? 11: digest,                        ; consent request digest
+  12: epoch-ms,                        ; commit deadline
+  13: signed-object-ref                ; signed authorization decision receipt
+}
+
+quota-reservation = {
+  0: opaque-id,
+  1: { * tstr => uint },               ; reserved named quota amounts
+  2: epoch-ms
+}
+
+security-epochs = {
+  0: uint,                             ; aggregate PEP security epoch
+  1: digest,                           ; policy bundle
+  2: uint,                             ; capability revocation epoch
+  3: uint,                             ; consent revocation epoch
+  4: uint,                             ; manifest/trust epoch
+  ? 5: uint                            ; attestation/reference epoch
+}
+
+op-commit = {
+  0: 83,
+  1: opaque-id,                        ; preparation ID
+  2: digest,                           ; exact OP_PREPARED digest
+  3: [* signed-object-ref],            ; obligation proofs
+  ? 4: signed-object-ref,              ; consent receipt
+  5: nonce,                            ; unique commit nonce
+  6: bstr,                             ; expected reservation version
+  ? 7: audit-ref                       ; client intent audit receipt
+}
+
+op-result = {
+  0: 84,
+  1: message-id,                       ; in_reply_to where applicable
+  ? 2: opaque-id,                      ; preparation ID
+  ? 3: nonce,                          ; commit nonce
+  4: bstr .size (16..64),              ; idempotency key
+  5: operation-terminal-status,
+  ? 6: any,                            ; typed result; mutually exclusive with 7
+  ? 7: encrypted-blob-ref,
+  ? 8: digest,                         ; output schema digest
+  ? 9: [* tstr],                       ; output classifications
+  ? 10: effect-receipt,
+  ? 11: bstr,                          ; resulting resource version
+  ? 12: { * tstr => uint },            ; resource/cost usage
+  13: audit-ref,
+  ? 14: signed-object-ref              ; separately authorized rollback token
+}
+
+operation-terminal-status =
+  "succeeded" / "failed" / "cancelled" / "expired" / "in-doubt"
+
+encrypted-blob-ref = {
+  0: uri,
+  1: media-type,
+  2: digest,
+  3: uint,                             ; ciphertext bytes
+  4: profile-id,                       ; encryption profile
+  ? 5: epoch-ms
+}
+
+effect-receipt = {
+  0: digest,                           ; committed effect digest
+  1: epoch-ms,
+  2: principal-id,                     ; executing tool/service
+  3: digest,                           ; manifest digest
+  4: digest,                           ; artifact digest
+  5: [* effect],
+  ? 6: signed-object-ref               ; downstream system receipt
+}
+
+op-cancel = {
+  0: 85,
+  1: tstr,                             ; request/preparation/operation/stream
+  2: bstr,                             ; target identifier
+  3: tstr,                             ; safe reason category
+  ? 4: tstr                            ; expected target state
+}
+
+op-status = {
+  0: 86,
+  1: tstr,                             ; query or result
+  2: bstr,                             ; operation/preparation/idempotency ID
+  ? 3: operation-state,
+  ? 4: signed-object-ref,
+  ? 5: epoch-ms
+}
+
+operation-state =
+    "unknown" / "preparing" / "prepared" / "committing"
+  / "succeeded" / "failed" / "cancelled" / "expired" / "in-doubt"
+
+; ---------------------------------------------------------------------------
+; Streams 96-99 and subscriptions 112-114
+; ---------------------------------------------------------------------------
+
+stream-open = {
+  0: 96,
+  1: opaque-id,                        ; stream ID, unique in session
+  2: message-id,                       ; parent operation/request
+  3: "sender-to-receiver" / "receiver-to-sender",
+  4: digest,                           ; content schema digest
+  5: [* tstr],                         ; classifications
+  6: uint,                             ; maximum total bytes
+  7: uint,                             ; maximum chunk bytes
+  8: uint,                             ; initial byte credit
+  9: uint,                             ; initial message credit
+  ? 10: digest,                        ; expected total ordered digest
+  11: epoch-ms
+}
+
+stream-data = {
+  0: 97,
+  1: opaque-id,
+  2: uint,                             ; chunk sequence from zero
+  3: uint,                             ; byte/item offset
+  4: bstr / [* any],                   ; one form fixed by stream schema
+  5: digest,                           ; chunk/session/stream/offset/data digest
+  6: bool                              ; end flag
+}
+
+stream-credit = {
+  0: 98,
+  1: opaque-id,
+  2: uint,                             ; additional byte credit
+  3: uint,                             ; additional message credit
+  4: uint,                             ; absolute total byte ceiling
+  5: uint                              ; absolute total message ceiling
+}
+
+stream-close = {
+  0: 99,
+  1: opaque-id,
+  2: uint,                             ; final bytes/items
+  3: uint,                             ; final chunk count
+  4: digest,                           ; ordered content digest
+  5: "complete" / "cancelled" / "failed",
+  ? 6: uint,                           ; safe error code
+  ? 7: audit-ref
+}
+
+subscribe = {
+  0: 112,
+  1: opaque-id,                        ; subscription ID
+  2: [+ tstr],                         ; event class IDs
+  3: [* resource-selector],
+  ? 4: signed-object-ref,              ; start checkpoint
+  ? 5: { * tstr => any },              ; registered bounded filters
+  6: epoch-ms,
+  7: uint,                             ; max events per second
+  8: uint                              ; initial event credit
+}
+
+event = {
+  0: 113,
+  1: opaque-id,
+  2: uint,                             ; subscription event sequence
+  3: signed-object-ref,                ; source checkpoint
+  4: tstr,                             ; event type
+  5: any,                              ; schema-selected event body
+  ? 6: [* tstr]                        ; redaction labels
+}
+
+unsubscribe = {
+  0: 114,
+  1: opaque-id,
+  2: tstr,                             ; reason
+  ? 3: uint,                           ; final received event sequence
+  ? 4: digest                          ; final ordered digest
+}
+
+; ---------------------------------------------------------------------------
+; Manifest and registry messages 128-131
+; ---------------------------------------------------------------------------
+
+manifest-get = {
+  0: 128,
+  ? 1: uri,                            ; tool ID
+  ? 2: semver,                         ; immutable version
+  ? 3: digest,                         ; exact manifest digest; preferred
+  4: bool,                             ; include artifact/provenance proofs
+  ? 5: uint                            ; maximum proof age ms
+}
+
+manifest-result = {
+  0: 129,
+  1: digest,
+  2: tool-manifest-token,              ; exact publisher-signed manifest
+  3: "active" / "deprecated" / "revoked" / "unknown",
+  4: [* signed-object-ref],            ; TUF/provenance/transparency proofs
+  5: epoch-ms
+}
+
+registry-query = {
+  0: 130,
+  1: [+ tstr],                         ; registered object types
+  ? 2: principal-id,                   ; publisher filter
+  ? 3: [* digest],                     ; exact object digests
+  ? 4: { * tstr => any },              ; registered typed query predicates
+  5: uint,
+  ? 6: page-cursor,
+  ? 7: uint                            ; privacy budget
+}
+
+registry-result = {
+  0: 131,
+  1: digest,                           ; query digest
+  2: [* registry-object],
+  ? 3: page-cursor,
+  4: epoch-ms,
+  5: signed-object-ref                 ; registry snapshot/checkpoint proof
+}
+
+registry-object = {
+  0: tstr,                             ; registered object type
+  1: digest,
+  2: bstr,                             ; exact signed object bytes
+  3: principal-id,                     ; publisher
+  4: signed-object-ref,                ; registry publication receipt
+  5: [* signed-object-ref],            ; TUF/transparency proofs
+  6: epoch-ms
+}
+
+; ---------------------------------------------------------------------------
+; Audit messages 144-147 and audit event
+; ---------------------------------------------------------------------------
+
+audit-submit = {
+  0: 144,
+  1: principal-id,                     ; event emitter
+  2: uint,                             ; first event sequence
+  3: uint,                             ; last event sequence
+  4: [+ audit-event-token],            ; exact COSE-signed audit events
+  ? 5: signed-object-ref,              ; prior checkpoint
+  6: uint                              ; requested maximum merge delay ms
+}
+
+audit-receipt = {
+  0: 145,
+  1: principal-id,                     ; log ID
+  2: [* digest],                       ; accepted event digests
+  3: [* rejected-audit-entry],
+  4: bstr,                             ; signed inclusion promise
+  5: uint,                             ; expected minimum tree size
+  6: epoch-ms,                         ; merge deadline
+  7: digest                            ; witness-policy digest
+}
+
+rejected-audit-entry = {
+  0: digest,
+  1: uint                              ; safe error code
+}
+
+audit-proof-request = {
+  0: 146,
+  1: principal-id,                     ; log ID
+  ? 2: digest,                         ; leaf/event digest for inclusion
+  ? 3: [uint, uint],                   ; smaller/larger tree sizes for consistency
+  4: nonce
+}
+
+audit-proof = {
+  0: 147,
+  1: principal-id,
+  2: nonce,
+  3: signed-tree-head,
+  ? 4: [* digest],                     ; inclusion proof hashes
+  ? 5: [* digest],                     ; consistency proof hashes
+  6: [* bstr]                          ; witness signatures/checkpoints
+}
+
+signed-tree-head = {
+  0: uint,                             ; tree size
+  1: digest,                           ; root hash
+  2: epoch-ms,
+  3: principal-id,                     ; log ID
+  4: bstr                              ; log signature
+}
+
+audit-event = {
+  0: bstr .size 16,                    ; event ID
+  1: tstr,                             ; registered event type
+  2: principal-id,                     ; emitter
+  3: key-id,
+  4: uint,                             ; emitter event sequence
+  5: epoch-ms,
+  6: tstr,                             ; trusted-time quality
+  ? 7: principal-id,                   ; primary subject
+  ? 8: actor-chain,
+  ? 9: session-id,
+  ? 10: message-id,
+  ? 11: message-id,                    ; correlation
+  ? 12: opaque-id,                     ; preparation/operation ID
+  ? 13: action-id,
+  ? 14: digest,                        ; canonical resource digest
+  ? 15: tstr,                          ; decision/result class
+  ? 16: uint,                          ; safe reason/error code
+  ? 17: evidence-digests,
+  ? 18: [* effect],
+  ? 19: { * tstr => uint },            ; bounded metrics
+  ? 20: [* tstr],                      ; privacy/redaction labels
+  ? 21: digest,                        ; previous emitter event hash
+  ? 22: encrypted-blob-ref             ; separately protected details
+}
+
+audit-event-token = #6.18(audit-event-cose-sign1)
+audit-event-cose-sign1 = [
+  bstr .cbor audit-event-protected-map, ; protected
+  {},                                  ; unprotected
+  bstr .cbor audit-event,              ; payload
+  bstr                                 ; signature
+]
+
+audit-event-protected-map = {
+  1: cose-alg,
+  2: [+ label],
+  3: "application/smcp-audit-event+cbor",
+  4: key-id,
+  60000: "SMCP-AUDIT-EVENT-v1"
+}
+
+evidence-digests = {
+  ? 0: digest,                         ; capability chain
+  ? 1: digest,                         ; consent receipt
+  ? 2: digest,                         ; policy bundle/decision
+  ? 3: digest,                         ; risk assessment
+  ? 4: digest,                         ; tool manifest
+  ? 5: digest,                         ; artifact
+  ? 6: digest,                         ; attestation result
+  ? 7: uint                            ; aggregate security epoch
+}
+
+; ---------------------------------------------------------------------------
+; Error message 255
+; ---------------------------------------------------------------------------
+
+error-body = {
+  0: 255,
+  1: uint,                             ; registered 32-bit error code
+  2: safe-text,                        ; safe localized-independent title
+  3: retry-class,
+  ? 4: message-id,                     ; related message/request
+  ? 5: tstr,                           ; failed protocol state
+  ? 6: epoch-ms,                       ; earliest safe retry time
+  ? 7: profile-id,                     ; required profile
+  ? 8: extension-id,                   ; required/unsupported extension
+  9: bstr .size 16                     ; random support correlation ID
+}
+
+retry-class =
+    "never" / "same-message" / "new-message"
+  / "after-reauth" / "after-administrator"
+
+; ---------------------------------------------------------------------------
+; Long-lived signed objects
+; ---------------------------------------------------------------------------
+
+tool-manifest = {
+  0: version,                          ; manifest format version
+  1: uri,                              ; canonical tool ID
+  2: semver,                           ; immutable release version
+  3: publisher,
+  4: [+ artifact],
+  5: [+ entrypoint],
+  6: permissions,
+  7: data-practices,
+  8: execution-limits,
+  9: sandbox-requirements,
+  10: dependencies,
+  11: provenance,
+  12: update-policy,
+  ? 13: attestation-requirements,
+  14: [* consent-rule],
+  ? 15: [* risk-hint],
+  ? 16: deprecation,
+  ? 17: [* extension-id],              ; critical manifest extensions
+  ? 18: { * extension-id => any }
+}
+
+tool-manifest-token = #6.18(tool-manifest-cose-sign1)
+tool-manifest-cose-sign1 = [
+  bstr .cbor tool-manifest-protected-map, ; protected
+  {},                                  ; unprotected
+  bstr .cbor tool-manifest,            ; payload
+  bstr                                 ; signature
+]
+
+tool-manifest-protected-map = {
+  1: cose-alg,
+  2: [+ label],
+  3: "application/smcp-tool-manifest+cbor",
+  4: key-id,
+  60000: "SMCP-TOOL-MANIFEST-v1"
+}
+
+publisher = {
+  0: principal-id,
+  1: key-id,
+  2: uri,                              ; security contact
+  3: uri                               ; support contact
+}
+
+artifact = {
+  0: media-type,
+  1: tstr,                             ; platform/architecture selector
+  2: digest,
+  3: uint,
+  4: [+ uri]                           ; retrieval locations, never trusted over digest
+}
+
+entrypoint = {
+  0: action-id,
+  1: digest,                           ; input schema digest
+  2: media-type,                       ; input schema media type
+  ? 3: uri,                            ; input schema reference
+  4: digest,                           ; output schema digest
+  5: media-type,
+  ? 6: uri,
+  7: [+ effect],
+  8: bool,                             ; read-only
+  9: bool,                             ; idempotent
+  10: bool                             ; supports prepare/commit
+}
+
+permissions = {
+  ? 0: [* filesystem-permission],
+  ? 1: [* network-permission],
+  ? 2: [* api-permission],
+  ? 3: [* tstr],                       ; devices
+  ? 4: [* tstr],                       ; named secret handles, never secret values
+  ? 5: [* tstr],                       ; process/OS capabilities
+  ? 6: [* resource-selector]           ; cloud/infrastructure resources
+}
+
+filesystem-permission = {
+  0: resource-id,                      ; root object ID
+  1: [* tstr],                         ; normalized relative path segments
+  2: [+ tstr],                         ; read/write/create/delete/execute/list
+  3: tstr                              ; deny/follow/within-root symlink policy
+}
+
+network-permission = {
+  0: tstr,                             ; protocol
+  1: tstr,                             ; exact host/service selector
+  2: [* uint],                         ; ports
+  3: bool,                             ; redirects permitted
+  ? 4: [* tstr]                        ; allowed data classifications
+}
+
+api-permission = {
+  0: uri,
+  1: [+ action-id],
+  ? 2: [* resource-selector]
+}
+
+data-practices = {
+  0: [* tstr],                         ; accepted input classifications
+  1: [* tstr],                         ; produced classifications
+  2: uint,                             ; maximum retention ms; 0 means none
+  3: bool,                             ; training use
+  4: [* tstr],                         ; storage/processing regions
+  5: [* principal-id],                 ; subprocessors
+  6: [* uri]                           ; allowed egress destinations
+}
+
+execution-limits = {
+  0: uint,                             ; CPU millis
+  1: uint,                             ; memory bytes
+  2: uint,                             ; storage bytes
+  3: uint,                             ; wall time ms
+  4: uint,                             ; output bytes
+  5: uint,                             ; outbound calls
+  6: uint                              ; concurrency
+}
+
+sandbox-requirements = {
+  0: profile-id,
+  1: [* tstr],                         ; permitted syscalls/capabilities
+  2: bool,                             ; dedicated user namespace
+  3: bool,                             ; dedicated network namespace
+  4: bool,                             ; privileged mode (normally false)
+  ? 5: digest                          ; detailed sandbox policy digest
+}
+
+dependencies = {
+  0: media-type,                       ; SBOM media type
+  1: digest,
+  ? 2: uri,
+  3: [* artifact-reference],
+  ? 4: [* tstr]                        ; license identifiers
+}
+
+provenance = {
+  0: digest,                           ; in-toto/SLSA statement digest
+  1: bstr,                             ; Sigstore bundle exact bytes
+  2: principal-id,                     ; builder identity
+  3: digest,                           ; source repository/tree digest
+  4: digest,                           ; build recipe/config digest
+  ? 5: uri                             ; transparency log reference
+}
+
+update-policy = {
+  0: uri,                              ; TUF repository
+  1: tstr,                             ; delegated targets role
+  2: tstr,                             ; target path
+  3: uint,                             ; minimum metadata version
+  4: epoch-ms                          ; metadata expiry
+}
+
+attestation-requirements = {
+  0: [+ profile-id],
+  1: [* digest],                       ; accepted reference value sets
+  2: uint,                             ; maximum evidence age ms
+  3: digest                            ; appraisal policy digest
+}
+
+consent-rule = {
+  0: action-id,
+  1: [+ tstr],                         ; effect classes
+  2: tstr,                             ; minimum authenticator assurance
+  3: uint,                             ; max receipt lifetime ms
+  4: uint                              ; max uses
+}
+
+risk-hint = {
+  0: tstr,                             ; factual registered factor only
+  1: any,
+  2: digest,                           ; evidence digest
+  3: epoch-ms
+}
+
+deprecation = {
+  0: "active" / "deprecated" / "revoked",
+  ? 1: epoch-ms,
+  ? 2: uri,
+  ? 3: [* action-id]
+}
+
+trust-bundle = {
+  0: tstr,                             ; trust domain ID
+  1: uint,                             ; monotonic bundle version
+  2: epoch-ms,
+  3: epoch-ms,
+  4: threshold-keys,                   ; offline trust/update roots
+  5: [* key-purpose-entry],
+  6: [+ profile-id],                   ; credential profiles
+  7: [* principal-id],                 ; registry principals
+  8: [* principal-id],                 ; transparency log/witness principals
+  9: [* uri],                          ; revocation/status endpoints
+  10: [+ suite-id],                    ; allowed algorithm suites
+  11: uint,                            ; maximum status staleness ms
+  ? 12: [* federation-agreement-ref]
+}
+
+trust-bundle-token = #6.18(trust-bundle-cose-sign1)
+trust-bundle-cose-sign1 = [
+  bstr .cbor trust-bundle-protected-map,
+  {},
+  bstr .cbor trust-bundle,
+  bstr
+]
+
+trust-bundle-protected-map = {
+  1: cose-alg,
+  2: [+ label],
+  3: "application/smcp-trust-bundle+cbor",
+  4: key-id,
+  60000: "SMCP-TRUST-BUNDLE-v1"
+}
+
+threshold-keys = {
+  0: uint,                             ; signature threshold
+  1: [+ bstr]                          ; trusted deterministic COSE_Key values
+}
+
+key-purpose-entry = {
+  0: tstr,                             ; capability/policy/manifest/audit/etc.
+  1: principal-id,
+  2: key-id,
+  3: bstr,
+  4: epoch-ms,
+  5: epoch-ms
+}
+
+federation-agreement-ref = {
+  0: tstr,                             ; remote trust domain
+  1: digest,
+  2: epoch-ms
+}
+
+authorization-decision = {
+  0: digest,                           ; immutable authorization-input digest
+  1: "permit" / "deny" / "indeterminate",
+  2: digest,                           ; policy bundle digest
+  3: uint,                             ; policy/security epoch
+  4: [* obligation],
+  5: [* uint],                         ; safe reason codes
+  6: epoch-ms,
+  7: epoch-ms,
+  8: principal-id                      ; PDP/PEP issuer
+}
+
+authorization-decision-token = #6.18(authorization-decision-cose-sign1)
+authorization-decision-cose-sign1 = [
+  bstr .cbor authorization-decision-protected-map,
+  {},
+  bstr .cbor authorization-decision,
+  bstr
+]
+
+authorization-decision-protected-map = {
+  1: cose-alg,
+  2: [+ label],
+  3: "application/smcp-authorization-decision+cbor",
+  4: key-id,
+  60000: "SMCP-AUTHORIZATION-DECISION-v1"
+}
+
+; Standalone long-lived objects are wrapped in COSE_Sign1 with protected
+; content-type/domain-separation headers defined by their profile. Their exact
+; bytes, not a decoded/re-encoded representation, are hashed and referenced.

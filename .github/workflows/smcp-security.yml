@@ -1,0 +1,209 @@
+name: SMCP Security
+
+on:
+  push:
+    branches: ["main", "v1.x"]
+    tags: ["v*.*.*"]
+    paths:
+      - "smcp-reference/**"
+      - ".github/workflows/smcp-security.yml"
+  pull_request:
+    paths:
+      - "smcp-reference/**"
+      - ".github/workflows/smcp-security.yml"
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: SMCP quality (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.10", "3.14"]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          enable-cache: false
+          version: 0.9.5
+      - run: uv python install ${{ matrix.python }}
+      - run: uv sync --project smcp-reference --frozen --all-groups --python ${{ matrix.python }}
+      - run: uv lock --project smcp-reference --check
+      - run: uv run --project smcp-reference --frozen python smcp-reference/scripts/security_gate.py
+      - run: uv run --project smcp-reference --frozen ruff check --config smcp-reference/pyproject.toml smcp-reference/src smcp-reference/tests smcp-reference/benchmarks smcp-reference/fuzz smcp-reference/scripts
+      - run: uv run --project smcp-reference --frozen pyright --project smcp-reference/pyproject.toml
+      - run: uv run --project smcp-reference --frozen coverage erase
+      - run: uv run --project smcp-reference --frozen coverage run --rcfile=smcp-reference/pyproject.toml -m pytest -c smcp-reference/pyproject.toml smcp-reference/tests -q -rs
+      - run: uv run --project smcp-reference --frozen coverage json --fail-under=0 --rcfile=smcp-reference/pyproject.toml -o smcp-reference/security-coverage.json
+      - run: uv run --project smcp-reference --frozen python smcp-reference/scripts/security_coverage_gate.py smcp-reference/security-coverage.json
+      - run: uv run --project smcp-reference --frozen coverage report --rcfile=smcp-reference/pyproject.toml
+      - if: runner.os == 'Linux'
+        run: test "$(uv run --project smcp-reference --frozen pytest smcp-reference/tests --collect-only -q | grep -c SKIPPED || true)" = "0"
+
+  scanners:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          enable-cache: false
+          version: 0.9.5
+      - run: uv python install 3.12
+      - run: uv sync --project smcp-reference --frozen --all-groups --python 3.12
+      - name: Secret scan
+        shell: bash
+        run: |
+          curl --fail --location --silent --show-error \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \
+            --output /tmp/gitleaks.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  /tmp/gitleaks.tar.gz" | sha256sum --check
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          /tmp/gitleaks git --redact --no-banner
+      - name: SAST
+        run: uvx --from bandit==1.9.4 bandit -r smcp-reference/src/smcp -lll -ii
+      - name: Dependency vulnerability gate
+        run: |
+          uv export --project smcp-reference --frozen --no-dev --no-emit-project \
+            --format requirements-txt --output-file /tmp/smcp-requirements.txt
+          uvx --from pip-audit==2.10.1 pip-audit --require-hashes \
+            --requirement /tmp/smcp-requirements.txt
+      - name: Dependency license gate
+        run: |
+          mkdir -p smcp-reference/dist
+          uv run --project smcp-reference --frozen --with pip-licenses==5.5.5 \
+            pip-licenses --format=json --output-file=smcp-reference/dist/licenses.json
+          uv run --project smcp-reference --frozen python smcp-reference/scripts/license_gate.py \
+            smcp-reference/dist/licenses.json --policy smcp-reference/license-policy.json
+      - name: Generate locked CycloneDX SBOM
+        run: |
+          mkdir -p smcp-reference/dist
+          uv run --project smcp-reference --frozen python smcp-reference/scripts/generate_sbom.py \
+            --lock smcp-reference/uv.lock \
+            --output smcp-reference/dist/smcp.cdx.json
+          uvx --from cyclonedx-bom==7.3.0 cyclonedx-py environment smcp-reference/.venv \
+            --output-format JSON \
+            --output-file smcp-reference/dist/smcp-environment.cdx.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: smcp-security-reports
+          path: smcp-reference/dist/*.json
+
+  fuzz:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          enable-cache: false
+          version: 0.9.5
+      - run: uv python install 3.12
+      - run: uv sync --project smcp-reference --frozen --group fuzz --python 3.12
+      - name: Fuzz every registered target
+        shell: bash
+        run: |
+          set -euo pipefail
+          for target in parser handshake transport serialization policy capability manifest discovery session core-record core-capability core-manifest core-diagnostic-json core-session cursor plugin-manifest audit-import encrypted-envelope subscription; do
+            uv run --project smcp-reference --frozen --group fuzz \
+              python smcp-reference/fuzz/atheris_runner.py "$target" -max_total_time=60
+          done
+
+  redis-cluster:
+    name: Real Redis Cluster consistency
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          enable-cache: false
+          version: 0.9.5
+      - run: uv python install 3.12
+      - run: uv sync --project smcp-reference --frozen --all-groups --python 3.12
+      - name: Start pinned six-node cluster
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose -f smcp-reference/integration_tests/redis_cluster/compose.yaml up --detach --wait
+          docker compose -f smcp-reference/integration_tests/redis_cluster/compose.yaml exec -T redis-1 \
+            redis-cli -p 7000 --cluster create \
+            127.0.0.1:7000 127.0.0.1:7001 127.0.0.1:7002 \
+            127.0.0.1:7003 127.0.0.1:7004 127.0.0.1:7005 \
+            --cluster-replicas 1 --cluster-yes
+      - name: Run consistency, Lua, failover, and outage tests
+        env:
+          SMCP_REDIS_CLUSTER_URL: redis://127.0.0.1:7000
+        run: >-
+          uv run --project smcp-reference --frozen
+          pytest -c smcp-reference/pyproject.toml
+          smcp-reference/integration_tests/redis_cluster -q
+      - if: always()
+        run: docker compose -f smcp-reference/integration_tests/redis_cluster/compose.yaml down --volumes
+
+  release-artifacts:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [quality, scanners, redis-cluster]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          enable-cache: false
+          version: 0.9.5
+      - run: uv python install 3.12
+      - run: uv sync --project smcp-reference --frozen --python 3.12
+      - working-directory: smcp-reference
+        run: |
+          uv build
+          uv run --frozen python scripts/generate_sbom.py --output dist/smcp.cdx.json
+      - name: Keyless Sigstore signing
+        uses: sigstore/gh-action-sigstore-python@5b79a39c381910c090341a2c9b0bf022c8b387e1 # v3.4.0
+        with:
+          inputs: smcp-reference/dist/*
+      - name: Build provenance
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-path: smcp-reference/dist/*
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: smcp-release-artifacts
+          path: smcp-reference/dist/
+
+  all-green:
+    if: always()
+    needs: [quality, scanners, fuzz, redis-cluster, release-artifacts]
+    runs-on: ubuntu-latest
+    steps:
+      - shell: bash
+        run: |
+          test "${{ needs.quality.result }}" = "success"
+          test "${{ needs.scanners.result }}" = "success"
+          test "${{ needs.redis-cluster.result }}" = "success"
+          test "${{ needs.fuzz.result }}" = "success" -o "${{ needs.fuzz.result }}" = "skipped"
+          test "${{ needs.release-artifacts.result }}" = "success" -o "${{ needs.release-artifacts.result }}" = "skipped"
