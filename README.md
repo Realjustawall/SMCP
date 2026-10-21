@@ -1,5 +1,6 @@
 # SMCP Python SDK
 
+
 <div align="center">
 
 <strong>Python implementation of the Secure Model Context Protocol (SMCP)</strong>
